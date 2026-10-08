@@ -1,0 +1,6 @@
+{
+  "name": "Offline UNO!",
+  "description": "Offline UNO card game with VS Computer bots and local LAN Wi-Fi multiplayer.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -37,6 +37,7 @@ fun PlayerHandRow(
   topDiscard: UnoCard?,
   activeColor: CardColor,
   isPlayerTurn: Boolean,
+  pendingDrawnCardId: String? = null,
   onCardClick: (UnoCard) -> Unit,
   modifier: Modifier = Modifier
 ) {
@@ -73,7 +74,11 @@ fun PlayerHandRow(
     ) {
       itemsIndexed(hand, key = { _, card -> card.id }) { index, card ->
         val isLegal = if (isPlayerTurn && topDiscard != null) {
-          UnoRulesEngine.isCardPlayable(card, topDiscard, activeColor)
+          if (pendingDrawnCardId != null) {
+            card.id == pendingDrawnCardId && UnoRulesEngine.isCardPlayable(card, topDiscard, activeColor)
+          } else {
+            UnoRulesEngine.isCardPlayable(card, topDiscard, activeColor)
+          }
         } else false
 
         CardView(

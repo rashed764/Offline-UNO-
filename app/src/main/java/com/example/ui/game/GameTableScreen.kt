@@ -25,6 +25,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Cached
+import androidx.compose.material.icons.filled.Gavel
+import androidx.compose.material.icons.filled.Report
 import androidx.compose.material.icons.filled.SmartToy
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -62,6 +64,7 @@ import com.example.game.model.CardValue
 import com.example.game.model.PlayerType
 import com.example.game.model.UnoCard
 import com.example.game.model.UnoPlayer
+import com.example.game.network.client.LanClientConnection
 import com.example.ui.components.CoinBadge
 import com.example.ui.components.GameButton
 import com.example.ui.theme.FredokaFontFamily
@@ -83,52 +86,123 @@ fun GameTableScreen(
   coinRepository: CoinRepository,
   audioManager: AudioManager,
   onLeaveGameClick: () -> Unit,
+  lanClient: LanClientConnection? = null,
   modifier: Modifier = Modifier
 ) {
-  val state by session.state.collectAsState()
+  val hostState by session.state.collectAsState()
+  val clientState by lanClient?.gameState?.collectAsState() ?: remember { mutableStateOf(null) }
   val coins by coinRepository.coinBalance.collectAsState()
   val coroutineScope = rememberCoroutineScope()
 
   // Track if coin settlement has already occurred for this round
   var hasSettledCoins by remember { mutableStateOf(false) }
 
-  // Autonomous bot coordinator with lifecycle-safe lifecycle attachment
-  DisposableEffect(session) {
-    val coordinator = BotCoordinator(session = session, scope = coroutineScope)
-    coordinator.start()
+  // Autonomous bot coordinator with lifecycle-safe lifecycle attachment (only runs if local host session has bots)
+  DisposableEffect(session, lanClient) {
+    var coordinator: BotCoordinator? = null
+    if (lanClient == null) {
+      coordinator = BotCoordinator(session = session, scope = coroutineScope)
+      coordinator.start()
+    }
     onDispose {
-      coordinator.stop()
+      coordinator?.stop()
     }
   }
 
+  // Derive active game view properties whether acting as Local Host or LAN Client
+  val isLanClientMode = lanClient != null
+  val activeColor = if (isLanClientMode && clientState != null) clientState!!.activeColor else hostState.activeColor
+  val topDiscard = if (isLanClientMode && clientState != null) clientState!!.topDiscard else hostState.topDiscard
+  val drawPileCount = if (isLanClientMode && clientState != null) clientState!!.drawPileCount else hostState.drawPileCount
+  val discardPileCount = if (isLanClientMode && clientState != null) clientState!!.discardPileCount else hostState.discardPileCount
+  val direction = if (isLanClientMode && clientState != null) clientState!!.direction else hostState.direction
+  val lastEventMessage = if (isLanClientMode && clientState != null) clientState!!.lastEventMessage else hostState.lastEventMessage
+  val totalPot = if (isLanClientMode && clientState != null) clientState!!.totalPot else hostState.totalPot
+  val pendingDrawnCardId = if (isLanClientMode && clientState != null) clientState!!.drawnCardPlayableId else hostState.drawnCardPlayableId
+
+  val localPlayerId = if (isLanClientMode) (lanClient?.assignedPlayerId ?: "") else (hostState.localPlayer?.id ?: "player_human")
+  val isLocalPlayerTurn = if (isLanClientMode && clientState != null) {
+    clientState!!.currentTurnPlayerId == localPlayerId
+  } else {
+    hostState.isLocalPlayerTurn
+  }
+
+  val localHand = if (isLanClientMode && clientState != null) {
+    clientState!!.clientHand
+  } else {
+    hostState.localPlayer?.hand ?: emptyList()
+  }
+
+  val localPlayerHasDeclaredUno = if (isLanClientMode && clientState != null) {
+    clientState!!.players.find { it.id == localPlayerId }?.hasDeclaredUno ?: false
+  } else {
+    hostState.localPlayer?.hasDeclaredUno ?: false
+  }
+
+  val isRoundEnded = if (isLanClientMode && clientState != null) {
+    clientState!!.isRoundEnded
+  } else {
+    hostState.status is GameStatus.RoundEnded
+  }
+
+  val winnerId = if (isLanClientMode && clientState != null) {
+    clientState!!.winnerPlayerId
+  } else {
+    (hostState.status as? GameStatus.RoundEnded)?.winner?.id
+  }
+
+  val winnerName = if (isLanClientMode && clientState != null) {
+    clientState!!.winnerPlayerName ?: "Winner"
+  } else {
+    (hostState.status as? GameStatus.RoundEnded)?.winner?.name ?: "Winner"
+  }
+
+  val isWaitingForWildColor = if (isLanClientMode && clientState != null) {
+    clientState!!.isWaitingForWildColor && clientState!!.wildColorChooserPlayerId == localPlayerId
+  } else {
+    hostState.status is GameStatus.WaitingForWildColor && (hostState.status as GameStatus.WaitingForWildColor).player.id == localPlayerId
+  }
+
   // Audio & Haptic cues on state transitions
-  LaunchedEffect(state.topDiscard?.id) {
-    if (state.topDiscard != null && state.status is GameStatus.InProgress) {
+  LaunchedEffect(topDiscard?.id) {
+    if (topDiscard != null && !isRoundEnded) {
       audioManager.playCardPlay()
     }
   }
 
-  LaunchedEffect(state.currentTurnIndex) {
-    if (state.isLocalPlayerTurn) {
+  LaunchedEffect(isLocalPlayerTurn) {
+    if (isLocalPlayerTurn) {
       audioManager.playTurnAlert()
     }
   }
 
   // Handle victory sound & exact one-time coin settlement
-  LaunchedEffect(state.status) {
-    val status = state.status
-    if (status is GameStatus.RoundEnded && !hasSettledCoins) {
+  LaunchedEffect(isRoundEnded) {
+    if (isRoundEnded && !hasSettledCoins) {
       hasSettledCoins = true
       audioManager.playWin()
-      val localPlayer = state.localPlayer
-      if (status.winner.id == localPlayer?.id) {
-        coinRepository.awardCoins(status.totalPot)
+      if (winnerId == localPlayerId) {
+        coinRepository.awardCoins(totalPot)
       }
     }
   }
 
-  val localPlayer = state.localPlayer ?: UnoPlayer("p1", "You", PlayerType.HUMAN)
-  val opponents = state.players.filter { it.id != localPlayer.id }
+  // Opponents list
+  val opponents: List<UnoPlayer> = if (isLanClientMode && clientState != null) {
+    clientState!!.players.filter { it.id != localPlayerId }.map { p ->
+      UnoPlayer(
+        id = p.id,
+        name = p.name,
+        type = p.type,
+        hand = List(p.cardCount) { UnoCard("dummy_${p.id}_$it", CardColor.RED, CardValue.ZERO) },
+        hasDeclaredUno = p.hasDeclaredUno,
+        isUnoVulnerable = p.isUnoVulnerable,
+        isConnected = p.isConnected
+      )
+    }
+  } else {
+    hostState.players.filter { it.id != localPlayerId }
+  }
 
   BoxWithConstraints(
     modifier = modifier
@@ -183,7 +257,7 @@ fun GameTableScreen(
               .padding(horizontal = 10.dp, vertical = 4.dp)
           ) {
             Text(
-              text = "POT: ${state.totalPot} COINS",
+              text = "POT: $totalPot COINS",
               fontFamily = FredokaFontFamily,
               fontWeight = FontWeight.Bold,
               fontSize = 13.sp,
@@ -198,8 +272,23 @@ fun GameTableScreen(
           verticalAlignment = Alignment.CenterVertically
         ) {
           opponents.forEach { opp ->
-            val isTheirTurn = state.currentPlayer?.id == opp.id
-            OpponentHudBadge(opponent = opp, isTurn = isTheirTurn)
+            val isTheirTurn = if (isLanClientMode && clientState != null) {
+              clientState!!.currentTurnPlayerId == opp.id
+            } else {
+              hostState.currentPlayer?.id == opp.id
+            }
+            OpponentHudBadge(
+              opponent = opp,
+              isTurn = isTheirTurn,
+              onCatchUno = {
+                audioManager.playUnoPenalty()
+                if (isLanClientMode) {
+                  lanClient?.catchUnoPenalty(opp.id)
+                } else {
+                  session.catchUnoPenalty(localPlayerId, opp.id)
+                }
+              }
+            )
           }
         }
 
@@ -222,24 +311,28 @@ fun GameTableScreen(
             CardView(
               card = UnoCard("draw_top", CardColor.WILD, CardValue.WILD),
               isFaceDown = true,
-              isPlayable = state.isLocalPlayerTurn,
+              isPlayable = isLocalPlayerTurn && pendingDrawnCardId == null,
               modifier = Modifier
                 .width(66.dp)
                 .testTag("draw_pile"),
               onClick = {
-                if (state.isLocalPlayerTurn && state.status is GameStatus.InProgress) {
+                if (isLocalPlayerTurn && pendingDrawnCardId == null && !isRoundEnded) {
                   audioManager.playCardDraw()
-                  session.drawCard(localPlayer.id)
+                  if (isLanClientMode) {
+                    lanClient?.drawCard()
+                  } else {
+                    session.drawCard(localPlayerId)
+                  }
                 }
               }
             )
             Spacer(modifier = Modifier.height(4.dp))
             Text(
-              text = "DRAW (${state.drawPileCount})",
+              text = "DRAW ($drawPileCount)",
               fontFamily = FredokaFontFamily,
               fontWeight = FontWeight.SemiBold,
               fontSize = 11.sp,
-              color = if (state.isLocalPlayerTurn) GoldAccent else Color(0xFF94A3B8)
+              color = if (isLocalPlayerTurn && pendingDrawnCardId == null) GoldAccent else Color(0xFF94A3B8)
             )
           }
 
@@ -254,7 +347,7 @@ fun GameTableScreen(
                 .shadow(8.dp, CircleShape)
                 .clip(CircleShape)
                 .background(
-                  when (state.activeColor) {
+                  when (activeColor) {
                     CardColor.RED -> UnoRed
                     CardColor.YELLOW -> UnoYellow
                     CardColor.GREEN -> UnoGreen
@@ -268,15 +361,15 @@ fun GameTableScreen(
               Icon(
                 imageVector = Icons.Default.Cached,
                 contentDescription = "Direction",
-                tint = if (state.activeColor == CardColor.YELLOW) Color.Black else Color.White,
+                tint = if (activeColor == CardColor.YELLOW) Color.Black else Color.White,
                 modifier = Modifier
                   .size(24.dp)
-                  .rotate(if (state.direction == PlayDirection.CLOCKWISE) 0f else 180f)
+                  .rotate(if (direction == PlayDirection.CLOCKWISE) 0f else 180f)
               )
             }
             Spacer(modifier = Modifier.height(4.dp))
             Text(
-              text = state.activeColor.displayName.uppercase(),
+              text = activeColor.displayName.uppercase(),
               fontFamily = FredokaFontFamily,
               fontWeight = FontWeight.Bold,
               fontSize = 12.sp,
@@ -286,7 +379,7 @@ fun GameTableScreen(
 
           // Discard Pile (Top card)
           Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            val top = state.topDiscard
+            val top = topDiscard
             if (top != null) {
               CardView(
                 card = top,
@@ -307,7 +400,7 @@ fun GameTableScreen(
             }
             Spacer(modifier = Modifier.height(4.dp))
             Text(
-              text = "DISCARD (${state.discardPileCount})",
+              text = "DISCARD ($discardPileCount)",
               fontFamily = FredokaFontFamily,
               fontWeight = FontWeight.SemiBold,
               fontSize = 11.sp,
@@ -327,7 +420,7 @@ fun GameTableScreen(
             .testTag("action_ticker_banner")
         ) {
           Row(verticalAlignment = Alignment.CenterVertically) {
-            if (state.isBotTurn) {
+            if (!isLanClientMode && hostState.isBotTurn) {
               val infiniteTransition = rememberInfiniteTransition(label = "pulse")
               val alpha by infiniteTransition.animateFloat(
                 initialValue = 0.4f,
@@ -344,7 +437,7 @@ fun GameTableScreen(
               Spacer(modifier = Modifier.width(8.dp))
             }
             Text(
-              text = state.lastEventMessage,
+              text = lastEventMessage,
               fontFamily = FredokaFontFamily,
               fontWeight = FontWeight.Medium,
               fontSize = 13.sp,
@@ -360,33 +453,68 @@ fun GameTableScreen(
         verticalAlignment = Alignment.Bottom,
         horizontalArrangement = Arrangement.SpaceBetween
       ) {
-        // Hand cards row (Disabled when it's bot's turn)
+        // Hand cards row
         Box(modifier = Modifier.weight(1f)) {
           PlayerHandRow(
-            hand = localPlayer.hand,
-            topDiscard = state.topDiscard,
-            activeColor = state.activeColor,
-            isPlayerTurn = state.isLocalPlayerTurn,
+            hand = localHand,
+            topDiscard = topDiscard,
+            activeColor = activeColor,
+            isPlayerTurn = isLocalPlayerTurn,
+            pendingDrawnCardId = pendingDrawnCardId,
             onCardClick = { card ->
-              if (state.isLocalPlayerTurn) {
+              if (isLocalPlayerTurn) {
                 audioManager.playCardPlay()
-                session.playCard(localPlayer.id, card.id)
+                if (isLanClientMode) {
+                  lanClient?.playCard(card.id)
+                } else {
+                  session.playCard(localPlayerId, card.id)
+                }
               }
             }
           )
         }
 
-        Spacer(modifier = Modifier.width(12.dp))
+        Spacer(modifier = Modifier.width(10.dp))
 
-        // UNO Button & Turn Status
+        // Actions Column: PASS button (if drawn card held) + UNO Button & Turn Status
         Column(
           horizontalAlignment = Alignment.CenterHorizontally,
-          verticalArrangement = Arrangement.Bottom
+          verticalArrangement = Arrangement.Bottom,
+          modifier = Modifier.padding(bottom = 4.dp)
         ) {
-          val canShoutUno = localPlayer.cardCount <= 2 && !localPlayer.hasDeclaredUno
+          // If a drawn playable card is held, show PASS TURN button
+          if (isLocalPlayerTurn && pendingDrawnCardId != null) {
+            Box(
+              modifier = Modifier
+                .clip(RoundedCornerShape(10.dp))
+                .background(Brush.horizontalGradient(listOf(Color(0xFFEAB308), Color(0xFFCA8A04))))
+                .clickable {
+                  audioManager.playButtonClick()
+                  if (isLanClientMode) {
+                    lanClient?.passDrawnTurn()
+                  } else {
+                    session.passDrawnCard(localPlayerId)
+                  }
+                }
+                .padding(horizontal = 12.dp, vertical = 6.dp)
+                .testTag("btn_pass_drawn_card"),
+              contentAlignment = Alignment.Center
+            ) {
+              Text(
+                text = "PASS TURN",
+                fontFamily = FredokaFontFamily,
+                fontWeight = FontWeight.Bold,
+                fontSize = 11.sp,
+                color = Color.Black
+              )
+            }
+            Spacer(modifier = Modifier.height(6.dp))
+          }
+
+          val canShoutUno = localHand.size <= 2 && !localPlayerHasDeclaredUno
           Box(
             modifier = Modifier
-              .size(56.dp)
+              .size(54.dp)
               .shadow(if (canShoutUno) 10.dp else 2.dp, CircleShape)
               .clip(CircleShape)
               .background(
@@ -402,8 +530,12 @@ fun GameTableScreen(
                 shape = CircleShape
               )
               .clickable(enabled = canShoutUno) {
-                audioManager.playTurnAlert()
-                session.declareUno(localPlayer.id)
+                audioManager.playUnoShout()
+                if (isLanClientMode) {
+                  lanClient?.declareUno()
+                } else {
+                  session.declareUno(localPlayerId)
+                }
               }
               .testTag("btn_declare_uno"),
             contentAlignment = Alignment.Center
@@ -421,36 +553,36 @@ fun GameTableScreen(
 
           Text(
             text = when {
-              state.isLocalPlayerTurn -> "YOUR TURN"
-              state.isBotTurn -> "${state.currentPlayer?.name?.uppercase()} THINKING..."
+              isLocalPlayerTurn -> if (pendingDrawnCardId != null) "PLAY DRAWN OR PASS" else "YOUR TURN"
+              !isLanClientMode && hostState.isBotTurn -> "${hostState.currentPlayer?.name?.uppercase()} THINKING..."
               else -> "WAITING..."
             },
             fontFamily = FredokaFontFamily,
             fontWeight = FontWeight.Bold,
-            fontSize = 11.sp,
-            color = if (state.isLocalPlayerTurn) UnoGreen else Color(0xFFFFD100)
+            fontSize = 10.sp,
+            color = if (isLocalPlayerTurn) UnoGreen else Color(0xFFFFD100)
           )
         }
       }
     }
 
-    // Wild Color Picker Modal when human plays Wild
-    if (state.status is GameStatus.WaitingForWildColor) {
-      val waiting = state.status as GameStatus.WaitingForWildColor
-      if (waiting.player.type == PlayerType.HUMAN) {
-        WildColorPickerModal(
-          onColorSelected = { selectedColor ->
-            audioManager.playCardPlay()
+    // Wild Color Picker Modal when player plays Wild
+    if (isWaitingForWildColor) {
+      WildColorPickerModal(
+        onColorSelected = { selectedColor ->
+          audioManager.playCardPlay()
+          if (isLanClientMode) {
+            lanClient?.chooseWildColor(selectedColor)
+          } else {
             session.selectWildColor(selectedColor)
           }
-        )
-      }
+        }
+      )
     }
 
     // Win Modal Dialog
-    if (state.status is GameStatus.RoundEnded) {
-      val result = state.status as GameStatus.RoundEnded
-      val isWinner = result.winner.id == localPlayer.id
+    if (isRoundEnded) {
+      val isWinner = winnerId == localPlayerId
 
       Box(
         modifier = Modifier
@@ -488,7 +620,7 @@ fun GameTableScreen(
               text = if (isWinner) {
                 "You played all cards and won the match pot!"
               } else {
-                "${result.winner.name} finished first!"
+                "$winnerName finished first!"
               },
               fontFamily = FredokaFontFamily,
               fontSize = 15.sp,
@@ -496,7 +628,7 @@ fun GameTableScreen(
             )
 
             Text(
-              text = if (isWinner) "PRIZE: +${result.totalPot} COINS" else "POT: ${result.totalPot} COINS",
+              text = if (isWinner) "PRIZE: +$totalPot COINS" else "POT: $totalPot COINS",
               fontFamily = FredokaFontFamily,
               fontWeight = FontWeight.Bold,
               fontSize = 20.sp,
@@ -521,7 +653,8 @@ fun GameTableScreen(
 @Composable
 private fun OpponentHudBadge(
   opponent: UnoPlayer,
-  isTurn: Boolean
+  isTurn: Boolean,
+  onCatchUno: () -> Unit = {}
 ) {
   val shape = RoundedCornerShape(12.dp)
 
@@ -582,6 +715,38 @@ private fun OpponentHudBadge(
         fontSize = 11.sp,
         color = if (opponent.cardCount == 1) UnoRed else Color(0xFFFFD100)
       )
+    }
+
+    // UNO Penalty Catch Button: Visible whenever opponent holds 1 card and has NOT declared UNO
+    if (opponent.cardCount == 1 && opponent.isUnoVulnerable) {
+      Spacer(modifier = Modifier.width(8.dp))
+      Box(
+        modifier = Modifier
+          .clip(RoundedCornerShape(8.dp))
+          .background(Brush.horizontalGradient(listOf(UnoRed, Color(0xFF991B1B))))
+          .border(1.dp, GoldAccent, RoundedCornerShape(8.dp))
+          .clickable { onCatchUno() }
+          .padding(horizontal = 6.dp, vertical = 4.dp)
+          .testTag("catch_uno_${opponent.id}"),
+        contentAlignment = Alignment.Center
+      ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+          Icon(
+            imageVector = Icons.Default.Gavel,
+            contentDescription = "Catch UNO Penalty",
+            tint = Color(0xFFFFD100),
+            modifier = Modifier.size(12.dp)
+          )
+          Spacer(modifier = Modifier.width(2.dp))
+          Text(
+            text = "CATCH!",
+            fontFamily = FredokaFontFamily,
+            fontWeight = FontWeight.ExtraBold,
+            fontSize = 10.sp,
+            color = Color.White
+          )
+        }
+      }
     }
   }
 }

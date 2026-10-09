@@ -34,20 +34,13 @@ import java.io.InputStreamReader
 import java.io.OutputStreamWriter
 import java.net.ServerSocket
 import java.net.Socket
-import java.security.MessageDigest
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.random.Random
 
 /**
  * Authoritative LAN Host Server.
- * Supports:
- * - Clean human-readable room code (e.g. "AB7K9P")
- * - In-memory secure room password verification
- * - QR payload generation with OFFLINEUNO:// schema
- * - Player readiness tracking
- * - Start Game validation (minimum 2 players & ready)
- * - Clean leave/close room broadcasts
+ * Supports automatic client game start broadcast, UNO catch validation, and drawn card turn passing.
  */
 class LanHostServer(
   private val hostPlayerName: String = "Host",
@@ -77,8 +70,9 @@ class LanHostServer(
         type = PlayerType.HUMAN,
         cardCount = 0,
         hasDeclaredUno = false,
+        isUnoVulnerable = false,
         isConnected = true,
-        isReady = true // Host is always ready
+        isReady = true
       )
     )
   )
@@ -201,7 +195,7 @@ class LanHostServer(
           return@launch
         }
 
-        // 1. Password Verification (Constant-time comparison)
+        // 1. Password Verification
         if (password.isNotEmpty()) {
           if (!constantTimeEquals(password, joinReq.password)) {
             sendRejection(writer, "WRONG_PASSWORD")
@@ -233,7 +227,6 @@ class LanHostServer(
           return@launch
         }
 
-        // Assign stable player ID
         val assignedId = "client_" + UUID.randomUUID().toString().take(8)
         val client = ConnectedClient(
           playerId = assignedId,
@@ -245,7 +238,6 @@ class LanHostServer(
 
         clientConnections[assignedId] = client
 
-        // Send acceptance
         val acceptedPayload = PlayerJoinAcceptedPayload(
           assignedPlayerId = assignedId,
           roomName = "$hostPlayerName's Room",
@@ -261,7 +253,6 @@ class LanHostServer(
         )
         client.send(acceptEnvelope)
 
-        // Update connected players list (Client starts as Ready by default upon joining)
         val updated = _connectedPlayers.value.toMutableList()
         updated.add(
           NetworkPlayerInfo(
@@ -270,6 +261,7 @@ class LanHostServer(
             type = PlayerType.LAN_CLIENT,
             cardCount = 0,
             hasDeclaredUno = false,
+            isUnoVulnerable = false,
             isConnected = true,
             isReady = true
           )
@@ -312,6 +304,14 @@ class LanHostServer(
       MessageType.PLAYER_READY -> {
         togglePlayerReady(playerId)
       }
+      MessageType.DECLARE_UNO -> {
+        session.declareUno(playerId)
+      }
+      MessageType.CATCH_UNO_PENALTY -> {
+        val action = NetworkSerializer.deserializePlayerAction(envelope.payload)
+        val target = action?.targetPlayerId ?: return
+        session.catchUnoPenalty(catcherId = playerId, targetPlayerId = target)
+      }
       MessageType.PING -> {
         val client = clientConnections[playerId]
         val pong = NetworkEnvelope(
@@ -340,6 +340,12 @@ class LanHostServer(
   fun executeClientAction(playerId: String, action: PlayerActionPayload): Boolean {
     val currentState = session.state.value
 
+    // Catch UNO does not require it to be the catcher's turn
+    if (action.actionType == ClientActionType.CATCH_UNO) {
+      val target = action.targetPlayerId ?: return false
+      return session.catchUnoPenalty(catcherId = playerId, targetPlayerId = target)
+    }
+
     if (currentState.currentPlayer?.id != playerId) {
       sendActionRejection(playerId, "NOT_YOUR_TURN")
       return false
@@ -358,12 +364,19 @@ class LanHostServer(
         val drawn = session.drawCard(playerId)
         drawn != null
       }
+      ClientActionType.PASS_DRAWN_TURN -> {
+        session.passDrawnCard(playerId)
+      }
       ClientActionType.CHOOSE_WILD_COLOR -> {
         val color = action.chosenColor ?: return false
         session.selectWildColor(color)
       }
       ClientActionType.DECLARE_UNO -> {
         session.declareUno(playerId)
+      }
+      ClientActionType.CATCH_UNO -> {
+        val target = action.targetPlayerId ?: return false
+        session.catchUnoPenalty(playerId, target)
       }
     }
   }
@@ -381,7 +394,6 @@ class LanHostServer(
 
   fun startGame(): Boolean {
     val currentPlayers = _connectedPlayers.value
-    // Minimum 2 players required, and all must be ready
     if (currentPlayers.size < 2) return false
     val allReady = currentPlayers.all { it.isReady }
     if (!allReady) return false
@@ -397,6 +409,7 @@ class LanHostServer(
     _isGameStarted.value = true
     session.startNewMatch(unoPlayers, entryFee)
 
+    // Critical fix: Broadcast GAME_STARTED and immediately follow with full authoritative initial state
     val startEnvelope = NetworkEnvelope(
       messageId = UUID.randomUUID().toString(),
       type = MessageType.GAME_STARTED,
@@ -404,6 +417,9 @@ class LanHostServer(
       payload = ""
     )
     broadcastToClients(startEnvelope)
+
+    // Broadcast room update marked as started as well for redundancy
+    broadcastRoomState()
     broadcastGameState(session.state.value)
     return true
   }
@@ -434,6 +450,7 @@ class LanHostServer(
         type = p.type,
         cardCount = p.cardCount,
         hasDeclaredUno = p.hasDeclaredUno,
+        isUnoVulnerable = p.isUnoVulnerable,
         isConnected = p.isConnected,
         isReady = true
       )
@@ -463,7 +480,8 @@ class LanHostServer(
         players = playerInfos,
         clientHand = clientHand,
         isWaitingForWildColor = waitingForWild,
-        wildColorChooserPlayerId = wildChooserId
+        wildColorChooserPlayerId = wildChooserId,
+        drawnCardPlayableId = gameState.drawnCardPlayableId
       )
 
       val envelope = NetworkEnvelope(
@@ -499,7 +517,6 @@ class LanHostServer(
     sessionObserverJob?.cancel()
     acceptJob?.cancel()
 
-    // Notify clients that host is disconnecting
     val hostDisconnectEnv = NetworkEnvelope(
       messageId = UUID.randomUUID().toString(),
       type = MessageType.HOST_DISCONNECTED,
@@ -530,9 +547,6 @@ class LanHostServer(
   }
 
   companion object {
-    /**
-     * Generates a 6-character uppercase readable room code without ambiguous characters (no 0, O, 1, I).
-     */
     fun generateRoomCode(): String {
       val chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
       return (1..6).map { chars[Random.nextInt(chars.length)] }.joinToString("")

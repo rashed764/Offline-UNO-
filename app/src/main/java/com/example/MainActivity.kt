@@ -5,6 +5,9 @@ import android.os.Bundle
 import android.view.View
 import android.view.WindowInsets
 import android.view.WindowInsetsController
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
@@ -21,6 +24,7 @@ import androidx.compose.ui.Modifier
 import com.example.game.engine.UnoGameSession
 import com.example.game.model.PlayerType
 import com.example.game.model.UnoPlayer
+import com.example.game.network.client.LanClientConnection
 import com.example.ui.game.GameTableScreen
 import com.example.ui.lan.HostWaitingRoomScreen
 import com.example.ui.lan.JoinWaitingRoomScreen
@@ -60,23 +64,12 @@ class MainActivity : ComponentActivity() {
   }
 
   private fun hideSystemBars() {
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-      window.insetsController?.let { controller ->
-        controller.hide(WindowInsets.Type.statusBars() or WindowInsets.Type.navigationBars())
-        controller.systemBarsBehavior =
-          WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-      }
-    } else {
-      @Suppress("DEPRECATION")
-      window.decorView.systemUiVisibility = (
-        View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
-          or View.SYSTEM_UI_FLAG_FULLSCREEN
-          or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
-          or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
-          or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
-          or View.SYSTEM_UI_FLAG_LAYOUT_STABLE
-      )
-    }
+    try {
+      val windowInsetsController = WindowCompat.getInsetsController(window, window.decorView)
+      windowInsetsController.systemBarsBehavior =
+        WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+      windowInsetsController.hide(WindowInsetsCompat.Type.systemBars())
+    } catch (_: Exception) {}
   }
 }
 
@@ -84,6 +77,7 @@ class MainActivity : ComponentActivity() {
 fun GameNavigationRoot(app: ColorClashApp) {
   var currentScreen by remember { mutableStateOf<Screen>(Screen.Loading) }
   var activeGameSession by remember { mutableStateOf(UnoGameSession()) }
+  var activeLanClient by remember { mutableStateOf<LanClientConnection?>(null) }
 
   BackHandler(enabled = currentScreen !is Screen.Lobby && currentScreen !is Screen.Loading) {
     currentScreen = when (val s = currentScreen) {
@@ -185,6 +179,7 @@ fun GameNavigationRoot(app: ColorClashApp) {
             } else {
               // VS COMPUTER autonomous offline flow
               if (app.coinRepository.deductCoins(screen.entryFee)) {
+                activeLanClient = null
                 val newSession = UnoGameSession()
                 activeGameSession = newSession
                 val players = mutableListOf<UnoPlayer>()
@@ -230,6 +225,7 @@ fun GameNavigationRoot(app: ColorClashApp) {
           },
           onStartMatch = { server ->
             if (app.coinRepository.deductCoins(screen.entryFee)) {
+              activeLanClient = null
               activeGameSession = server.gameSession
               currentScreen = Screen.GameTable(isVsFriends = true, screen.entryFee, screen.playerCount)
             }
@@ -246,7 +242,11 @@ fun GameNavigationRoot(app: ColorClashApp) {
             currentScreen = Screen.Lobby
           },
           onGameStarted = { client ->
-            currentScreen = Screen.GameTable(isVsFriends = true, entryFee = 50, playerCount = 2)
+            val room = client.roomState.value
+            val entry = room?.entryFee ?: 50
+            app.coinRepository.deductCoins(entry)
+            activeLanClient = client
+            currentScreen = Screen.GameTable(isVsFriends = true, entryFee = entry, playerCount = room?.maxPlayers ?: 2)
           }
         )
       }
@@ -256,7 +256,10 @@ fun GameNavigationRoot(app: ColorClashApp) {
           session = activeGameSession,
           coinRepository = app.coinRepository,
           audioManager = app.audioManager,
+          lanClient = activeLanClient,
           onLeaveGameClick = {
+            activeLanClient?.disconnect()
+            activeLanClient = null
             currentScreen = Screen.Lobby
           }
         )

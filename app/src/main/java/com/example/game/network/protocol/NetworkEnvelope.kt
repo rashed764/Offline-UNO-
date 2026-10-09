@@ -21,6 +21,10 @@ enum class MessageType {
   PLAYER_ACTION,
   ACTION_REJECTED,
 
+  // UNO Declarations & Catch Penalty
+  DECLARE_UNO,
+  CATCH_UNO_PENALTY,
+
   // Heartbeat & Presence
   PLAYER_DISCONNECTED,
   HOST_DISCONNECTED,
@@ -31,7 +35,6 @@ enum class MessageType {
 
 /**
  * Standard Network Envelope transmitted over TCP streams.
- * Contains protocol version, message ID, message type, sender ID, and JSON payload.
  */
 data class NetworkEnvelope(
   val protocolVersion: Int = 1,

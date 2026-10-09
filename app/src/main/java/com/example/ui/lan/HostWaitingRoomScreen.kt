@@ -49,6 +49,7 @@ import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -57,6 +58,7 @@ import com.example.core.audio.AudioManager
 import com.example.core.economy.CoinRepository
 import com.example.core.persistence.PreferencesManager
 import com.example.game.network.core.LanNetworkUtils
+import com.example.game.network.discovery.LanDiscoveryManager
 import com.example.game.network.host.LanHostServer
 import com.example.game.network.qr.QrCodeGenerator
 import com.example.ui.components.CoinBadge

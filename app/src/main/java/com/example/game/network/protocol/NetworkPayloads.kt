@@ -15,8 +15,10 @@ import com.example.game.model.UnoPlayer
 enum class ClientActionType {
   PLAY_CARD,
   DRAW_CARD,
+  PASS_DRAWN_TURN, // When player draws a card but chooses not to play it
   CHOOSE_WILD_COLOR,
-  DECLARE_UNO
+  DECLARE_UNO,
+  CATCH_UNO // Catch another player who reached 1 card without declaring UNO
 }
 
 /**
@@ -25,7 +27,8 @@ enum class ClientActionType {
 data class PlayerActionPayload(
   val actionType: ClientActionType,
   val cardId: String? = null,
-  val chosenColor: CardColor? = null
+  val chosenColor: CardColor? = null,
+  val targetPlayerId: String? = null
 )
 
 /**
@@ -66,7 +69,8 @@ data class NetworkPlayerInfo(
   val type: PlayerType,
   val cardCount: Int,
   val hasDeclaredUno: Boolean,
-  val isConnected: Boolean,
+  val isUnoVulnerable: Boolean = false,
+  val isConnected: Boolean = true,
   val isReady: Boolean = false
 )
 
@@ -84,7 +88,6 @@ data class RoomStatePayload(
 
 /**
  * Network-safe authoritative snapshot sent to clients.
- * Each client receives their own hand, while opponent hands are omitted (card count only).
  */
 data class NetworkGameStatePayload(
   val currentTurnPlayerId: String?,
@@ -101,5 +104,6 @@ data class NetworkGameStatePayload(
   val players: List<NetworkPlayerInfo>,
   val clientHand: List<UnoCard>,
   val isWaitingForWildColor: Boolean,
-  val wildColorChooserPlayerId: String?
+  val wildColorChooserPlayerId: String?,
+  val drawnCardPlayableId: String? = null // When drawn card is playable during same turn
 )

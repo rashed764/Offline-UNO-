@@ -18,6 +18,7 @@ data class UnoPlayer(
   val type: PlayerType,
   val hand: List<UnoCard> = emptyList(),
   val hasDeclaredUno: Boolean = false,
+  val isUnoVulnerable: Boolean = false, // Vulnerable to being caught if 1 card left and didn't declare UNO
   val isConnected: Boolean = true
 ) {
   val cardCount: Int get() = hand.size
@@ -25,7 +26,12 @@ data class UnoPlayer(
   val isHandEmpty: Boolean get() = hand.isEmpty()
 
   fun withAddedCards(newCards: List<UnoCard>): UnoPlayer {
-    return copy(hand = hand + newCards, hasDeclaredUno = if (hand.size + newCards.size == 1) hasDeclaredUno else false)
+    val newTotal = hand.size + newCards.size
+    return copy(
+      hand = hand + newCards,
+      hasDeclaredUno = if (newTotal == 1) hasDeclaredUno else false,
+      isUnoVulnerable = if (newTotal == 1) isUnoVulnerable else false
+    )
   }
 
   fun withRemovedCard(cardId: String): UnoPlayer {
@@ -34,10 +40,19 @@ data class UnoPlayer(
     if (index >= 0) {
       updatedHand.removeAt(index)
     }
-    return copy(hand = updatedHand)
+    val newCount = updatedHand.size
+    return copy(
+      hand = updatedHand,
+      hasDeclaredUno = if (newCount == 1) hasDeclaredUno else false,
+      isUnoVulnerable = if (newCount == 1) !hasDeclaredUno else false
+    )
   }
 
   fun withUnoDeclared(declared: Boolean): UnoPlayer {
-    return copy(hasDeclaredUno = declared)
+    return copy(hasDeclaredUno = declared, isUnoVulnerable = if (declared) false else isUnoVulnerable)
+  }
+
+  fun withUnoVulnerability(vulnerable: Boolean): UnoPlayer {
+    return copy(isUnoVulnerable = vulnerable)
   }
 }

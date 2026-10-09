@@ -47,7 +47,8 @@ data class UnoGameState(
   val status: GameStatus,
   val lastEventMessage: String,
   val entryFee: Int = 50,
-  val totalPot: Int = 100
+  val totalPot: Int = 100,
+  val drawnCardPlayableId: String? = null // Non-null when player just drew a card that is legal to play
 ) {
   val currentPlayer: UnoPlayer? get() = players.getOrNull(currentTurnIndex)
   val localPlayer: UnoPlayer? get() = players.firstOrNull { it.type == PlayerType.HUMAN }
@@ -58,7 +59,7 @@ data class UnoGameState(
 /**
  * Authoritative, decoupled UNO Game Session Controller.
  * Handles game initialization, legal moves, wild card resolution, card draws,
- * and turn transitions.
+ * immediate play of drawn cards, UNO declaration, catch penalty, and turn transitions.
  */
 class UnoGameSession(
   private val random: Random = Random.Default
@@ -71,32 +72,27 @@ class UnoGameSession(
   private var status: GameStatus = GameStatus.NotStarted
   private var lastMessage = "Waiting for game to begin"
   private var entryFee = 50
+  private var pendingDrawnCardId: String? = null
 
   private val _state = MutableStateFlow(buildState())
   val state: StateFlow<UnoGameState> = _state.asStateFlow()
 
-  /**
-   * Initializes a brand new match with the given player definitions and entry fee.
-   * Standard deal: 7 cards each, opening card revealed.
-   */
   fun startNewMatch(players: List<UnoPlayer>, fee: Int) {
     require(players.size in 2..4) { "UNO supports 2 to 4 players" }
     entryFee = fee
-    playersList = players.map { it.copy(hand = emptyList(), hasDeclaredUno = false) }.toMutableList()
+    playersList = players.map { it.copy(hand = emptyList(), hasDeclaredUno = false, isUnoVulnerable = false) }.toMutableList()
     direction = PlayDirection.CLOCKWISE
     turnIndex = 0
+    pendingDrawnCardId = null
 
-    // 1. Create and reset 108 cards deck
     val fullDeck = UnoDeckFactory.createStandard108Deck()
     piles.resetWithDeck(fullDeck)
 
-    // 2. Deal 7 cards to each player
     for (i in playersList.indices) {
       val dealtHand = piles.drawCards(7)
       playersList[i] = playersList[i].copy(hand = dealtHand)
     }
 
-    // 3. Draw initial top discard card. If Wild Draw Four, reshuffle until legal opening card
     var initialTop = piles.drawCard() ?: UnoCard("start_fallback", CardColor.RED, CardValue.ZERO)
     while (initialTop.value == CardValue.WILD_DRAW_FOUR) {
       piles.discard(initialTop)
@@ -106,7 +102,6 @@ class UnoGameSession(
 
     piles.discard(initialTop)
 
-    // 4. Initial color & opening card special action resolution
     activeColor = if (initialTop.color == CardColor.WILD) {
       CardColor.RED
     } else {
@@ -116,7 +111,6 @@ class UnoGameSession(
     status = GameStatus.InProgress
     lastMessage = "Match started! First card is ${initialTop.color.name} ${initialTop.value.name}"
 
-    // Handle initial opening card effect if action card
     when (initialTop.value) {
       CardValue.SKIP -> {
         lastMessage = "${playersList[turnIndex].name} is skipped on opening!"
@@ -146,20 +140,25 @@ class UnoGameSession(
 
   /**
    * Attempts to play a card from a player's hand.
-   * Returns true if legal and processed, false if illegal.
    */
   fun playCard(playerId: String, cardId: String): Boolean {
     val current = playersList.getOrNull(turnIndex) ?: return false
-    if (current.id != playerId) return false // Not this player's turn
+    if (current.id != playerId) return false
     if (status !is GameStatus.InProgress) return false
+
+    // If a card was drawn and waiting decision, player can only play that drawn card or pass
+    if (pendingDrawnCardId != null && pendingDrawnCardId != cardId) {
+      return false
+    }
 
     val top = piles.topDiscard ?: return false
     val card = current.hand.find { it.id == cardId } ?: return false
 
-    // Legal move check
     if (!UnoRulesEngine.isCardPlayable(card, top, activeColor)) {
       return false
     }
+
+    pendingDrawnCardId = null
 
     // Remove from hand and add to discard
     playersList[turnIndex] = current.withRemovedCard(cardId)
@@ -175,10 +174,20 @@ class UnoGameSession(
       return true
     }
 
-    // Auto-check UNO status
-    if (playersList[turnIndex].cardCount == 1) {
-      playersList[turnIndex] = playersList[turnIndex].withUnoDeclared(true)
-      lastMessage = "${current.name} has ONE card left! UNO!"
+    // Check UNO status: Bot auto declares UNO; Human becomes vulnerable if didn't declare
+    val newCardCount = playersList[turnIndex].cardCount
+    if (newCardCount == 1) {
+      if (current.type == PlayerType.BOT) {
+        playersList[turnIndex] = playersList[turnIndex].withUnoDeclared(true)
+        lastMessage = "${current.name} shouted UNO!"
+      } else {
+        if (playersList[turnIndex].hasDeclaredUno) {
+          lastMessage = "${current.name} shouted UNO!"
+        } else {
+          playersList[turnIndex] = playersList[turnIndex].withUnoVulnerability(true)
+          lastMessage = "${current.name} has ONE card left!"
+        }
+      }
     }
 
     // Handle card effect
@@ -200,12 +209,11 @@ class UnoGameSession(
         val skippedIndex = UnoRulesEngine.calculateNextTurnIndex(turnIndex, playersList.size, direction.multiplier, 1)
         val skippedPlayer = playersList[skippedIndex]
         lastMessage = "${current.name} played Skip! ${skippedPlayer.name} was skipped."
-        advanceTurn(steps = 2) // Skip 1 player
+        advanceTurn(steps = 2)
       }
       is UnoRulesEngine.CardEffect.ReverseDirection -> {
         activeColor = card.color
         if (playersList.size == 2) {
-          // In 2-player UNO, Reverse functions exactly like Skip
           lastMessage = "${current.name} played Reverse (Acts as Skip in 1v1)!"
           advanceTurn(steps = 2)
         } else {
@@ -221,7 +229,7 @@ class UnoGameSession(
         val drawn = piles.drawCards(2)
         playersList[targetIndex] = target.withAddedCards(drawn)
         lastMessage = "${current.name} played +2! ${target.name} drew 2 cards and forfeited turn."
-        advanceTurn(steps = 2) // Draws 2 and misses turn
+        advanceTurn(steps = 2)
       }
       is UnoRulesEngine.CardEffect.None -> {
         activeColor = card.color
@@ -235,8 +243,52 @@ class UnoGameSession(
   }
 
   /**
-   * Resolves the color selection for a previously played Wild or Wild Draw Four.
+   * Current player draws a card from the draw pile according to official UNO rules:
+   * - Draws 1 card
+   * - If the drawn card is legally playable, the player REMAINS the current player and can play it immediately!
+   * - If the drawn card is not playable, turn advances automatically.
    */
+  fun drawCard(playerId: String): UnoCard? {
+    val current = playersList.getOrNull(turnIndex) ?: return null
+    if (current.id != playerId) return null
+    if (status !is GameStatus.InProgress) return null
+
+    val drawn = piles.drawCard() ?: return null
+    playersList[turnIndex] = current.withAddedCards(listOf(drawn))
+
+    val top = piles.topDiscard
+    val isPlayable = top != null && UnoRulesEngine.isCardPlayable(drawn, top, activeColor)
+
+    if (isPlayable) {
+      // Drawn card can be played immediately! Hold turn for player decision.
+      pendingDrawnCardId = drawn.id
+      lastMessage = "${current.name} drew ${drawn.color.name} ${drawn.value.name} (Playable!)"
+    } else {
+      // Not playable: turn advances to next player
+      pendingDrawnCardId = null
+      lastMessage = "${current.name} drew a card."
+      advanceTurn(steps = 1)
+    }
+
+    publishState()
+    return drawn
+  }
+
+  /**
+   * If a player drew a playable card but decides to keep it and pass.
+   */
+  fun passDrawnCard(playerId: String): Boolean {
+    val current = playersList.getOrNull(turnIndex) ?: return false
+    if (current.id != playerId) return false
+    if (pendingDrawnCardId == null) return false
+
+    pendingDrawnCardId = null
+    lastMessage = "${current.name} kept the drawn card and passed."
+    advanceTurn(steps = 1)
+    publishState()
+    return true
+  }
+
   fun selectWildColor(selectedColor: CardColor): Boolean {
     val waiting = status as? GameStatus.WaitingForWildColor ?: return false
     require(selectedColor != CardColor.WILD)
@@ -251,7 +303,7 @@ class UnoGameSession(
       playersList[targetIndex] = target.withAddedCards(drawn)
       lastMessage = "${current.name} picked ${selectedColor.displayName}. ${target.name} drew 4 cards and forfeited turn!"
       status = GameStatus.InProgress
-      advanceTurn(steps = 2) // Miss turn after drawing 4
+      advanceTurn(steps = 2)
     } else {
       lastMessage = "${current.name} picked ${selectedColor.displayName} as the active color."
       status = GameStatus.InProgress
@@ -263,25 +315,7 @@ class UnoGameSession(
   }
 
   /**
-   * Current player draws a card from the draw pile.
-   */
-  fun drawCard(playerId: String): UnoCard? {
-    val current = playersList.getOrNull(turnIndex) ?: return null
-    if (current.id != playerId) return null
-    if (status !is GameStatus.InProgress) return null
-
-    val drawn = piles.drawCard() ?: return null
-    playersList[turnIndex] = current.withAddedCards(listOf(drawn))
-    lastMessage = "${current.name} drew a card from the deck."
-
-    // Advance turn to next player on draw
-    advanceTurn(steps = 1)
-    publishState()
-    return drawn
-  }
-
-  /**
-   * Declares UNO for the given player.
+   * Declares UNO for a player who has 1 or 2 cards.
    */
   fun declareUno(playerId: String): Boolean {
     val index = playersList.indexOfFirst { it.id == playerId }
@@ -293,6 +327,27 @@ class UnoGameSession(
         publishState()
         return true
       }
+    }
+    return false
+  }
+
+  /**
+   * UNO Penalty Catch:
+   * If a player has 1 card, did not declare UNO, and another player catches them,
+   * the vulnerable player must draw 2 penalty cards. Applied exactly once.
+   */
+  fun catchUnoPenalty(catcherId: String, targetPlayerId: String): Boolean {
+    val targetIndex = playersList.indexOfFirst { it.id == targetPlayerId }
+    if (targetIndex < 0) return false
+    val target = playersList[targetIndex]
+
+    if (target.cardCount == 1 && target.isUnoVulnerable) {
+      val penaltyCards = piles.drawCards(2)
+      playersList[targetIndex] = target.withAddedCards(penaltyCards).withUnoVulnerability(false)
+      val catcher = playersList.find { it.id == catcherId }
+      lastMessage = "${catcher?.name ?: "Opponent"} caught ${target.name} not saying UNO! +2 Cards penalty!"
+      publishState()
+      return true
     }
     return false
   }
@@ -323,7 +378,8 @@ class UnoGameSession(
       status = status,
       lastEventMessage = lastMessage,
       entryFee = entryFee,
-      totalPot = entryFee * playersList.size.coerceAtLeast(1)
+      totalPot = entryFee * playersList.size.coerceAtLeast(1),
+      drawnCardPlayableId = pendingDrawnCardId
     )
   }
 

@@ -228,6 +228,21 @@ class LanClientConnection(
     sendAction(pid, payload)
   }
 
+  fun passDrawnTurn() {
+    val pid = assignedPlayerId ?: return
+    val payload = PlayerActionPayload(actionType = ClientActionType.PASS_DRAWN_TURN)
+    sendAction(pid, payload)
+  }
+
+  fun catchUnoPenalty(targetPlayerId: String) {
+    val pid = assignedPlayerId ?: return
+    val payload = PlayerActionPayload(
+      actionType = ClientActionType.CATCH_UNO,
+      targetPlayerId = targetPlayerId
+    )
+    sendAction(pid, payload)
+  }
+
   private fun sendAction(senderId: String, payload: PlayerActionPayload) {
     val envelope = NetworkEnvelope(
       messageId = UUID.randomUUID().toString(),

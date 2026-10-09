@@ -20,7 +20,6 @@ import org.json.JSONObject
 
 /**
  * Robust, zero-overhead JSON serializer for the Offline UNO! LAN protocol.
- * Uses Android platform org.json to eliminate third-party reflection issues.
  */
 object NetworkSerializer {
 
@@ -49,7 +48,7 @@ object NetworkSerializer {
     }
   }
 
-  // --- Join Request Serialization ---
+  // --- Join Request ---
   fun serializeJoinRequest(payload: PlayerJoinRequestPayload): String {
     val obj = JSONObject()
     obj.put("name", payload.playerName)
@@ -73,7 +72,7 @@ object NetworkSerializer {
     }
   }
 
-  // --- Join Accepted Serialization ---
+  // --- Join Accepted ---
   fun serializeJoinAccepted(payload: PlayerJoinAcceptedPayload): String {
     val obj = JSONObject()
     obj.put("assignedId", payload.assignedPlayerId)
@@ -99,7 +98,7 @@ object NetworkSerializer {
     }
   }
 
-  // --- Room State Serialization ---
+  // --- Room State ---
   fun serializeRoomState(payload: RoomStatePayload): String {
     val obj = JSONObject()
     obj.put("hostId", payload.hostPlayerId)
@@ -116,6 +115,7 @@ object NetworkSerializer {
       pObj.put("type", p.type.name)
       pObj.put("count", p.cardCount)
       pObj.put("uno", p.hasDeclaredUno)
+      pObj.put("vuln", p.isUnoVulnerable)
       pObj.put("conn", p.isConnected)
       pObj.put("ready", p.isReady)
       arr.put(pObj)
@@ -138,6 +138,7 @@ object NetworkSerializer {
             type = PlayerType.valueOf(pObj.getString("type")),
             cardCount = pObj.getInt("count"),
             hasDeclaredUno = pObj.getBoolean("uno"),
+            isUnoVulnerable = if (pObj.has("vuln")) pObj.getBoolean("vuln") else false,
             isConnected = pObj.getBoolean("conn"),
             isReady = if (pObj.has("ready")) pObj.getBoolean("ready") else false
           )
@@ -156,12 +157,13 @@ object NetworkSerializer {
     }
   }
 
-  // --- Player Action Serialization ---
+  // --- Player Action ---
   fun serializePlayerAction(payload: PlayerActionPayload): String {
     val obj = JSONObject()
     obj.put("action", payload.actionType.name)
     if (payload.cardId != null) obj.put("cardId", payload.cardId)
     if (payload.chosenColor != null) obj.put("color", payload.chosenColor.name)
+    if (payload.targetPlayerId != null) obj.put("target", payload.targetPlayerId)
     return obj.toString()
   }
 
@@ -171,14 +173,15 @@ object NetworkSerializer {
       PlayerActionPayload(
         actionType = ClientActionType.valueOf(obj.getString("action")),
         cardId = if (obj.has("cardId")) obj.getString("cardId") else null,
-        chosenColor = if (obj.has("color")) CardColor.valueOf(obj.getString("color")) else null
+        chosenColor = if (obj.has("color")) CardColor.valueOf(obj.getString("color")) else null,
+        targetPlayerId = if (obj.has("target")) obj.getString("target") else null
       )
     } catch (_: Exception) {
       null
     }
   }
 
-  // --- Game State Serialization ---
+  // --- Game State ---
   fun serializeGameState(payload: NetworkGameStatePayload): String {
     val obj = JSONObject()
     if (payload.currentTurnPlayerId != null) obj.put("turnId", payload.currentTurnPlayerId)
@@ -193,6 +196,7 @@ object NetworkSerializer {
     obj.put("msg", payload.lastEventMessage)
     obj.put("waitingWild", payload.isWaitingForWildColor)
     if (payload.wildColorChooserPlayerId != null) obj.put("wildChooser", payload.wildColorChooserPlayerId)
+    if (payload.drawnCardPlayableId != null) obj.put("drawnPlayable", payload.drawnCardPlayableId)
 
     if (payload.topDiscard != null) {
       val cardObj = JSONObject()
@@ -210,6 +214,7 @@ object NetworkSerializer {
       pObj.put("type", p.type.name)
       pObj.put("count", p.cardCount)
       pObj.put("uno", p.hasDeclaredUno)
+      pObj.put("vuln", p.isUnoVulnerable)
       pObj.put("conn", p.isConnected)
       pObj.put("ready", p.isReady)
       playersArr.put(pObj)
@@ -252,6 +257,7 @@ object NetworkSerializer {
             type = PlayerType.valueOf(pObj.getString("type")),
             cardCount = pObj.getInt("count"),
             hasDeclaredUno = pObj.getBoolean("uno"),
+            isUnoVulnerable = if (pObj.has("vuln")) pObj.getBoolean("vuln") else false,
             isConnected = pObj.getBoolean("conn"),
             isReady = if (pObj.has("ready")) pObj.getBoolean("ready") else false
           )
@@ -286,7 +292,8 @@ object NetworkSerializer {
         players = playersList,
         clientHand = handList,
         isWaitingForWildColor = obj.getBoolean("waitingWild"),
-        wildColorChooserPlayerId = if (obj.has("wildChooser")) obj.getString("wildChooser") else null
+        wildColorChooserPlayerId = if (obj.has("wildChooser")) obj.getString("wildChooser") else null,
+        drawnCardPlayableId = if (obj.has("drawnPlayable")) obj.getString("drawnPlayable") else null
       )
     } catch (_: Exception) {
       null

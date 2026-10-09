@@ -103,18 +103,29 @@ fun JoinWaitingRoomScreen(
 
   val connectionState by clientConnection.connectionState.collectAsState()
   val roomState by clientConnection.roomState.collectAsState()
+  val gameState by clientConnection.gameState.collectAsState()
+  val clientIsGameStarted by clientConnection.isGameStarted.collectAsState()
   val errorMessage by clientConnection.lastErrorMessage.collectAsState()
+
+  var isStartingGame by remember { mutableStateOf(false) }
 
   DisposableEffect(Unit) {
     onDispose {
-      clientConnection.disconnect()
+      if (!isStartingGame) {
+        android.util.Log.i("LAN-CLIENT", "JoinWaitingRoomScreen disposed without game start. Disconnecting client.")
+        clientConnection.disconnect()
+      } else {
+        android.util.Log.i("LAN-CLIENT", "JoinWaitingRoomScreen disposed due to match start. Preserving client connection.")
+      }
     }
   }
 
-  // Observe match start signal from host
-  LaunchedEffect(roomState?.isGameStarted) {
-    if (roomState?.isGameStarted == true) {
+  // Observe match start signal and initial game state from host
+  LaunchedEffect(clientIsGameStarted, roomState?.isGameStarted, gameState) {
+    if ((clientIsGameStarted || roomState?.isGameStarted == true) && gameState != null) {
+      android.util.Log.i("LAN-CLIENT", "Game start and initial state validated. Transitioning to GameTableScreen.")
       audioManager.playTurnAlert()
+      isStartingGame = true
       onGameStarted(clientConnection)
     }
   }

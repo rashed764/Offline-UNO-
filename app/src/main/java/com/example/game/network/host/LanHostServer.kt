@@ -57,6 +57,7 @@ class LanHostServer(
   val hostPlayerId = "host_" + UUID.randomUUID().toString().take(8)
 
   private var serverSocket: ServerSocket? = null
+  val localPort: Int get() = serverSocket?.localPort ?: port
   private var acceptJob: Job? = null
   private var sessionObserverJob: Job? = null
 
@@ -393,10 +394,17 @@ class LanHostServer(
   }
 
   fun startGame(): Boolean {
+    Log.i(TAG, "Host requested startGame(). Connected players: ${_connectedPlayers.value.size}")
     val currentPlayers = _connectedPlayers.value
-    if (currentPlayers.size < 2) return false
+    if (currentPlayers.size < 2) {
+      Log.w(TAG, "Cannot start game: insufficient players (${currentPlayers.size})")
+      return false
+    }
     val allReady = currentPlayers.all { it.isReady }
-    if (!allReady) return false
+    if (!allReady) {
+      Log.w(TAG, "Cannot start game: not all players are ready.")
+      return false
+    }
 
     val unoPlayers = currentPlayers.map { p ->
       UnoPlayer(
@@ -408,6 +416,7 @@ class LanHostServer(
 
     _isGameStarted.value = true
     session.startNewMatch(unoPlayers, entryFee)
+    Log.i(TAG, "Match started in session. Broadcasting GAME_STARTED and initial game state.")
 
     // Critical fix: Broadcast GAME_STARTED and immediately follow with full authoritative initial state
     val startEnvelope = NetworkEnvelope(
@@ -417,10 +426,12 @@ class LanHostServer(
       payload = ""
     )
     broadcastToClients(startEnvelope)
+    Log.i(TAG, "Broadcasted GAME_STARTED message to all clients.")
 
     // Broadcast room update marked as started as well for redundancy
     broadcastRoomState()
     broadcastGameState(session.state.value)
+    Log.i(TAG, "Broadcasted initial authoritative game state and room state.")
     return true
   }
 

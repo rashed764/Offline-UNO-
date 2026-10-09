@@ -52,6 +52,9 @@ class LanClientConnection(
   private val _connectionState = MutableStateFlow(ConnectionState.DISCONNECTED)
   val connectionState: StateFlow<ConnectionState> = _connectionState.asStateFlow()
 
+  private val _isGameStarted = MutableStateFlow(false)
+  val isGameStarted: StateFlow<Boolean> = _isGameStarted.asStateFlow()
+
   private val _roomState = MutableStateFlow<RoomStatePayload?>(null)
   val roomState: StateFlow<RoomStatePayload?> = _roomState.asStateFlow()
 
@@ -141,6 +144,11 @@ class LanClientConnection(
         }
       }
 
+      MessageType.GAME_STARTED -> {
+        Log.i(TAG, "Received GAME_STARTED message from host.")
+        _isGameStarted.value = true
+      }
+
       MessageType.PLAYER_JOIN_REJECTED -> {
         val reasonMsg = when (envelope.payload) {
           "WRONG_PASSWORD" -> "Incorrect room password."
@@ -168,7 +176,11 @@ class LanClientConnection(
       MessageType.GAME_STATE_UPDATE -> {
         val payload = NetworkSerializer.deserializeGameState(envelope.payload)
         if (payload != null) {
+          Log.d(TAG, "Received game state update. Active color: ${payload.activeColor}, Turn: ${payload.currentTurnPlayerId}, Hand size: ${payload.clientHand.size}")
           _gameState.value = payload
+        } else {
+          Log.w(TAG, "Failed to deserialize game state update payload.")
+          _lastErrorMessage.value = "Received malformed game state from host."
         }
       }
 

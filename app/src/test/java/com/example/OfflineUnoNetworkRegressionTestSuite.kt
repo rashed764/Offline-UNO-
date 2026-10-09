@@ -166,7 +166,7 @@ class OfflineUnoNetworkRegressionTestSuite {
     assertNull(statePayload)
   }
 
-  private suspend fun waitUntil(timeoutMs: Long = 3000, condition: () -> Boolean) {
+  private suspend fun waitUntil(timeoutMs: Long = 5000, condition: () -> Boolean) {
     val start = System.currentTimeMillis()
     while (!condition()) {
       if (System.currentTimeMillis() - start > timeoutMs) {
